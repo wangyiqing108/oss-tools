@@ -1,0 +1,21 @@
+#!/bin/bash
+function mysql_conn() {
+    sql=$1
+    mysql_host="$(cat /etc/nova/nova.conf|grep -F 'connection = '|awk -F ":" '{print $3}'|awk -F'@' '{print $2}'|awk -F'/' '{print $1}')"
+    password=$(cat /etc/nova/nova.conf|grep -F 'connection = '|awk -F ":" '{print $3}'|awk -F'@' '{print $1}')
+    port=$(cat /etc/nova/nova.conf|grep -F 'connection = '|awk -F ":" '{print $4}'|awk -F'/' '{print $1}')
+    if [ "$port" == "" ];then port=3306;fi
+    mysql -unova -p${password} -P${port} -h${mysql_host} nova -Ne "${sql}"
+}
+
+compute_count_sql='select count(*) from services where topic = "compute" and timestampdiff(SECOND,updated_at,utc_timestamp())<3600;'
+used_instance_sql='select count(*) from instances where deleted=0 and vm_state="active"'
+
+#compute_count=$(mysql_conn "$compute_count_sql")
+compute_count=$(nova-manage service list|grep compute|wc -l)
+used_instance=$(mysql_conn "$used_instance_sql")
+max_instance=$(cat /etc/nova/nova.conf|grep max_instances_per_host|awk '{print $3}')
+max_instances=$(( $max_instance * $compute_count ))
+free_instances=$(( $max_instances - $used_instance ))
+instance_compare="1:$max_instance"
+echo "$compute_count,$instance_compare,$max_instances,$used_instance,$free_instances"

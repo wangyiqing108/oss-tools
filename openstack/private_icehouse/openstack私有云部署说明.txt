@@ -1,0 +1,436 @@
+一、初始化系统
+openstack nova-network和neutron两种网络，网卡配置有一定差异，国内和国外又有2网卡，4网卡之分，一下面将详细描述平台网络的配置方法。
+
+1. 统一网卡名称
+
+# 如果没有初始化网卡配置，需要初始化网卡
+# havana-2-hw havana海外2网卡
+# havana-4-gn havana国内2网卡
+# icehouse-2-gn icehouse国内2网卡
+# icehouse-2-hw icehouse海外2网卡
+# icehouse-4-gn icehouse国内4网卡
+# 以上步骤已经由IDC上线时初始化
+
+private_icehouse/install/init/nic-init.sh "icehouse-4-gn" / "icehouse-2-hw"
+
+# 验证初始化和网络模式是否正确
+mussh -H $cluster -c 'ifconfig br0'
+
+# 确认网络是否已经调整完交换机的接口模式
+mussh -H $cluster -c '/bin/show-switchport all'
+
+2. 系统初始化
+# 指定集群，把宿主机IP放到列表文件中
+cluster="list-buy01_lt"
+
+# 检查交付主机是否正确
+mussh -H $cluster -c 'cat /etc/issue|head -n1'
+mussh -H $cluster -c 'hostname'
+
+# 初始化操作
+# icehouse-6.0 icehouse-5.0 havana
+# controler 14个包，compute 6个包
+private_icehouse/install/init/init.sh
+
+mussh -H $cluster -C "private_icehouse/install/init/init.sh"
+mussh -H $cluster -c 'rpm -qa|grep openstack|wc -l'
+
+3. 配置主机名
+private_icehouse/install/init/host.sh
+# 海外br0:1内网IP     --国内br0内网IP
+
+mussh -H $cluster -C "private_icehouse/install/init/host.sh"
+mussh -H $cluster -c 'echo 10. >> /etc/services_hosts_allow'
+
+
+二、配置Openstack及其他服务
+
+1.拷贝安装脚本
+# Icehouse 部署
+
+vi private_icehouse/install/master/master.conf
+NODE_MANAGE_NIC=br0
+NODE_PUB_NIC=br-bond1
+MASTER_NAME_A=m-21-201-buy01-mjq.bj-cn.vps.letv.cn
+MASTER_NAME_B=m-21-202-buy01-mjq.bj-cn.vps.letv.cn
+MASTER_IP=10.185.21.201
+MASTER_OTHER_IP=10.185.21.202
+VIP_NAME=m-21-200-buy01-mjq.bj-cn.vps.letv.cn
+VIP=10.185.21.200
+MASTER_A=10.185.21.201
+MASTER_B=10.185.21.202
+ID=21
+KEEPALIVE=MASTER  #执行完后需要在202的改为BACKUP，并重启服务。
+*_DB_PORT=  #相关DB_PORT都要修改
+
+
+vi private_icehouse/install/node/node.conf
+# NODE_MANAGE_NIC 管理网
+# PUB_NIC 外网
+NODE_MANAGE_NIC=br0
+NODE_PUB_NIC=br-eth1
+PHY_PUB_NIC=eth1
+# 内网默认 br-int
+# Horizon 端口,海外用20000
+HTTP_PORT=80
+# IP地址第三段
+ID=143
+# keepaplive的接口
+KEEPALIVE=MASTER/BACKUP
+INTERFACE=br0
+
+
+for i in `cat $cluster`;do ( sudo scp -r private_icehouse  $i:/root/  ) & done;wait
+
+2.安装Glusterfs
+#在两个管理节点，先修改为对应变量值，并执行。
+
+MASTER_NAME_A=m-138-201-buy01-lt.sin-as.vps.letv.cn
+MASTER_NAME_B=m-138-202-buy01-lt.sin-as.vps.letv.cn
+MASTER_SNAME_A=m-138-201-buy01-lt
+MASTER_SNAME_B=m-138-202-buy01-lt
+
+# Gluster
+source /root/install/master/master.conf
+
+umount /dev/mapper/VGSYS-lv_letv
+e2fsck -f -y  /dev/mapper/VGSYS-lv_letv
+
+lvresize -L 204800M /dev/mapper/VGSYS-lv_letv -f
+
+mkfs -t ext4 -m 1 /dev/VGSYS/lv_letv
+resize2fs -p /dev/VGSYS/lv_letv
+
+lvcreate -l 100%FREE -n lv_gfs VGSYS
+mkfs -t ext4 -m 1 /dev/VGSYS/lv_gfs
+
+mv /data/smokeping /
+mkdir -p /gfs
+service glusterd start ; chkconfig glusterd on
+echo "/dev/mapper/VGSYS-lv_gfs /gfs                   ext4    defaults        1 2" >> /etc/fstab
+mount -a
+
+# 非LVM
+umount -l /letv
+mkfs -t ext4 -m 1 /dev/sda5    
+mv /data/smokeping /
+mkdir -p /gfs
+service glusterd start ; chkconfig glusterd on
+sed -i '/\letv/d' /etc/fstab
+echo "/dev/sda5  /gfs                   ext4    defaults        1 2" >> /etc/fstab
+mount -a
+mkdir -p /letv/openstack
+
+# node 1
+gluster peer probe $MASTER_NAME_B
+gluster peer status
+mkdir /gfs/gluster
+sleep 1
+gluster volume create vol-storage replica 2 $MASTER_NAME_A:/gfs/gluster $MASTER_NAME_B:/gfs/gluster
+gluster volume start vol-storage
+gluster volume info
+sleep 1
+mount -t glusterfs $HOSTNAME:/vol-storage /data
+echo "mount -t glusterfs $HOSTNAME:/vol-storage /data" >> /etc/rc.d/rc.local
+echo "# $HOSTNAME:/vol-storage /data glusterfs defaults,_netdev 0 0" >> /etc/fstab
+mount -a
+
+# node 2
+gluster peer probe $MASTER_NAME_A
+gluster peer status ; mkdir /gfs/gluster
+gluster volume info
+sleep 1
+mount -t glusterfs $HOSTNAME:/vol-storage /data
+echo "mount -t glusterfs $HOSTNAME:/vol-storage /data" >> /etc/rc.d/rc.local
+echo "# $HOSTNAME:/vol-storage /data glusterfs defaults,_netdev 0 0" >> /etc/fstab
+mount -a
+
+#gluster 创建过程如果失败，执行下面命令后再重建。
+gluster volume delete vol-storage
+cd /gfs/gluster/
+for i in `attr -lq .`; do setfattr -x trusted.$i .; done
+
+3.安装RabbitMQ
+# Rabbit MQ
+
+# node 1
+service rabbitmq-server start
+chkconfig rabbitmq-server on
+scp -r /var/lib/rabbitmq/.erlang.cookie root@$MASTER_SNAME_B:/var/lib/rabbitmq/
+
+# node 2
+chown rabbitmq:rabbitmq /var/lib/rabbitmq/.erlang.cookie
+service rabbitmq-server restart
+chkconfig rabbitmq-server on
+
+# node 1 & 2
+rabbitmqctl stop
+rabbitmq-server -detached
+
+# node 1
+rabbitmqctl stop_app
+rabbitmqctl join_cluster rabbit@$MASTER_SNAME_B
+
+rabbitmqctl start_app
+
+# node 2
+rabbitmqctl start_app
+
+# node 1 & 2
+echo '[
+{rabbitmq_management,
+ [{listener, [{port, 15672},
+          {ip, "127.0.0.1"}
+         ]}
+ ]},
+{rabbit, [
+    {cluster_partition_handling, autoheal}
+  ]}
+].' > /etc/rabbitmq/rabbitmq.config
+/etc/init.d/rabbitmq-server restart
+
+# node 1
+rabbitmqctl set_policy HA '^(?!amq\.).*' '{"ha-mode": "all", "ha-sync-mode":"automatic"}'
+rabbitmqctl delete_user guest
+rabbitmqctl add_user rabbitmq 1eC10ud1sG00d
+rabbitmqctl set_permissions -p / rabbitmq ".*" ".*" ".*"
+rabbitmqctl cluster_status
+# 其他命令
+#rabbitmqctl cluster_status          //集群状态
+#rabbitmqctl list_users           //用户列表
+#rabbitmqctl list_user_permissions rabbitmq           //用户权限
+#rabbitmqctl list_policies           //规则
+#rabbitmqctl list_queues           //队列
+
+# Mysql
+#y.cnf
+#efault-storage-engine = innodb
+#nnodb_file_per_table
+#ollation-server = utf8_general_ci
+#nit-connect = 'SET NAMES utf8'
+#haracter-set-server = utf8
+
+#reate database keystone;
+#reate database nova;
+#reate database neutron;
+#reate database glance;
+#reate database cinder;
+#reate database heat;
+#rant all on keystone.* to keystone@"10.121.157.%" identified by "6b7f426cf2" with grant #ption;
+#rant all on nova.* to nova@"10.121.157.%" identified by "f77463fb8a" with grant option;
+#rant all on neutron.* to neutron@"10.121.157.%" identified by "95bd68d7e2" with grant option;
+#rant all on glance.* to glance@"10.121.157.%" identified by "1bdaf9f426" with grant option;
+
+4.安装Haproxy和keepalived
+vi /root/install/master/master.conf   node2上面改
+KEEPALIVE=BACKUP
+
+# node 1 & 2
+sh ../ha.sh
+
+5.安装OpenStack组件
+#检测DB连接是否OK
+db_test.sh
+
+#按顺序执行下面脚本
+01_keystone.sh
+
+在第一台执行：Please execute follow command:下面的命令
+
+source /root/.bash_profile --2台执行
+keystone tenant-list   --测试服务是否成功
+WARNING: Bypassing authentication using a token & endpoint (authentication credentials are being ignored).
+
+01_user-create.sh -- 只在第一台执行
+02_glance.sh
+glance image-list  --测试服务是否成功
+ 
+03_nova.sh
+04_neutron.sh
+05_dashboard.sh
+07_other.sh 
+
+6.计算节点部署
+#将管理节点（201、202）注释掉
+for i in `cat $cluster`;do ( sudo ssh -n $i "cd /root/install/node;sh node-scripts.sh" )  & done
+
+#管理节点上面看下计算机点是否都起来了
+nova service-list
+
+#所有机器重启一下
+#优先重启管理节点，保证管理节点新起来，要不还得起服务
+for i in `cat $cluster`;do ( sudo ssh -n $i "reboot" )  & done
+
+如果时间不同步
+/etc/init.d/ntpd stop
+ntpdate 0.centos.pool.ntp.org
+/etc/init.d/ntpd start
+hwclock -w
+
+
+四、后续操作
+1. 上传镜像
+mkdir /letv/images
+cd /letv/images
+nohup wget http://115.182.93.170:8080/KVM-image/Linux/LetvOS_1.6.0_cdrom_150925.qcow2 &
+nohup wget http://115.182.93.170:8080/KVM-image/Linux/Ubuntu-14.04_cdrom_150917.qcow2 &
+nohup wget http://115.182.93.170:8080/KVM-image/Windows/win2k8_40G_cdrom-141229v4.qcow2 &
+
+nohup wget http://123.59.176.250:8080/os/images/kvm/linux/LetvOS_1.7.0_cdrom_160802.qcow2 &
+nohup wget http://115.182.93.170:8080/KVM-image/Linux/LetvOS_2.2.0_cdrom_150925.qcow2 &
+# 石雪峰
+#wget http://115.182.93.170:8080/KVM-image/Linux/Ubuntu-14.04_cdrom_150917.qcow2_new
+
+glance image-create --name=LetvOS_1.6.0 --disk-format=qcow2 --container-format=ovf --is-public=true --progress < LetvOS_1.6.0_cdrom_150925.qcow2
+glance image-create --name=Ubuntu-14.04 --disk-format=qcow2 --container-format=ovf --is-public=true --progress < Ubuntu-14.04_cdrom_150917.qcow2
+glance image-create --name=Win2k8 --disk-format=qcow2 --container-format=ovf --is-public=true --progress < win2k8_40G_cdrom-141229v4.qcow2
+
+glance image-create --name=LetvOS_1.7.0 --disk-format=qcow2 --container-format=ovf --is-public=true --progress < LetvOS_1.7.0_cdrom_160802.qcow2
+glance image-create --name=LetvOS_2.2.0 --disk-format=qcow2 --container-format=ovf --is-public=true --progress < LetvOS_2.2.0_base_cdrom-160423v00.qcow2
+#glance image-create --name=Ubuntu-14.04_new --disk-format=qcow2 --container-format=ovf --is-public=true < Ubuntu-14.04_cdrom_150917.qcow2_new 
+# celiometer抓取参数
+for i in `glance image-list|awk '{print $2}'|grep "-"`;do nova image-meta $i set hw_qemu_guest_agent=yes;done
+
+2. 配置Flavor
+4C-8G-100G 标准
+8C-16G-200G 高配
+4C-4G-50G  测试
+# 电商
+6C-6G-100G
+8C-12G-100G
+# cdn
+8C-16G-200G
+
+#nova flavor-delete 1;nova flavor-delete 2;nova flavor-delete 3;nova flavor-delete 4;nova flavor-delete 5
+# V1
+nova flavor-create 4C-8G-100G 1 8192 100 4 --swap 6194
+# V2
+nova flavor-create 8C-16G-200G 2 16384 200 8 --swap 6194
+# V3
+nova flavor-create 4C-4G-50G 3 4096 50 4 --swap 6194
+# Other
+nova flavor-create 8C-8G-100G 4 8192 100 8 --swap 6194
+nova flavor-create 4C-16G-100G 5 16384 100 4 --swap 6194
+nova flavor-create 8C-16G-100G 6 16384 100 8 --swap 6194
+nova flavor-create 4C-8G-50G 7 8192 50 4 --swap 6194
+nova flavor-create 8C-4G-50G 8 4096 50 8 --swap 6194
+nova flavor-create 8C-8G-50G 9 8192 50 8 --swap 6194
+
+# QoS
+nova flavor-key 4C-8G-100G set quota:disk_total_iops_sec=400
+nova flavor-key 8C-16G-200G set quota:disk_total_iops_sec=400
+nova flavor-key 4C-4G-50G set quota:disk_total_iops_sec=400
+nova flavor-key 8C-8G-100G set quota:disk_total_iops_sec=400
+nova flavor-key 4C-16G-100G set quota:disk_total_iops_sec=400
+nova flavor-key 8C-16G-100G set quota:disk_total_iops_sec=400
+nova flavor-key 4C-8G-50G set quota:disk_total_iops_sec=400
+nova flavor-key 8C-4G-50G set quota:disk_total_iops_sec=400
+nova flavor-key 8C-8G-50G set quota:disk_total_iops_sec=400
+#千兆
+nova flavor-key 4C-8G-100G set quota:vif_inbound_average=51200
+nova flavor-key 4C-8G-100G set quota:vif_outbound_average=51200
+nova flavor-key 8C-16G-200G set quota:vif_inbound_average=102400
+nova flavor-key 8C-16G-200G set quota:vif_outbound_average=102400
+nova flavor-key 4C-4G-50G set quota:vif_inbound_average=51200
+nova flavor-key 4C-4G-50G set quota:vif_outbound_average=51200
+nova flavor-key 8C-8G-100G set quota:vif_inbound_average=102400
+nova flavor-key 8C-8G-100G set quota:vif_outbound_average=102400
+nova flavor-key 4C-16G-100G set quota:vif_inbound_average=51200
+nova flavor-key 4C-16G-100G set quota:vif_outbound_average=51200
+nova flavor-key 8C-16G-100G set quota:vif_inbound_average=102400
+nova flavor-key 8C-16G-100G set quota:vif_outbound_average=102400
+nova flavor-key 4C-8G-50G set quota:vif_inbound_average=51200
+nova flavor-key 4C-8G-50G set quota:vif_outbound_average=51200
+nova flavor-key 8C-4G-50G set quota:vif_inbound_average=102400
+nova flavor-key 8C-4G-50G set quota:vif_outbound_average=102400
+nova flavor-key 8C-8G-50G set quota:vif_inbound_average=102400
+nova flavor-key 8C-8G-50G set quota:vif_outbound_average=102400
+#万兆
+nova flavor-key 4C-8G-100G set quota:vif_inbound_average=128000
+nova flavor-key 4C-8G-100G set quota:vif_outbound_average=128000
+nova flavor-key 8C-16G-200G set quota:vif_inbound_average=128000
+nova flavor-key 8C-16G-200G set quota:vif_outbound_average=128000
+nova flavor-key 4C-4G-50G set quota:vif_inbound_average=128000
+nova flavor-key 4C-4G-50G set quota:vif_outbound_average=128000
+nova flavor-key 8C-8G-100G set quota:vif_inbound_average=128000
+nova flavor-key 8C-8G-100G set quota:vif_outbound_average=128000
+nova flavor-key 4C-16G-100G set quota:vif_inbound_average=128000
+nova flavor-key 4C-16G-100G set quota:vif_outbound_average=128000
+nova flavor-key 8C-16G-100G set quota:vif_inbound_average=128000
+nova flavor-key 8C-16G-100G set quota:vif_outbound_average=128000
+nova flavor-key 4C-8G-50G set quota:vif_inbound_average=128000
+nova flavor-key 4C-8G-50G set quota:vif_outbound_average=128000
+nova flavor-key 8C-4G-50G set quota:vif_inbound_average=128000
+nova flavor-key 8C-4G-50G set quota:vif_outbound_average=128000
+nova flavor-key 8C-8G-50G set quota:vif_inbound_average=128000
+nova flavor-key 8C-8G-50G set quota:vif_outbound_average=128000
+
+# V4(电商)
+#nova flavor-create 6C-6G-100G 4 6144 100 6 --swap 6194
+nova flavor-create 8C-12G-100G 11 12288 100 8 --swap 6194
+# 石雪峰
+nova flavor-create 8C-16G-360G 12 16384 360 8 --swap 6194
+# QoS
+nova flavor-key 8C-12G-100G set quota:disk_total_iops_sec=400
+nova flavor-key 8C-12G-100G set quota:vif_inbound_average=128000
+nova flavor-key 8C-12G-100G set quota:vif_outbound_average=128000
+nova flavor-key 8C-16G-360G set quota:disk_total_iops_sec=400
+nova flavor-key 8C-16G-360G set quota:vif_inbound_average=128000
+nova flavor-key 8C-16G-360G set quota:vif_outbound_average=128000
+
+#金融V7
+nova flavor-create 12C-32G-1024G 10 32768 1024 12 --swap 6194
+nova flavor-key 12C-32G-1024G set quota:disk_total_iops_sec=400
+nova flavor-key 12C-32G-1024G set quota:vif_inbound_average=128000
+nova flavor-key 12C-32G-1024G set quota:vif_outbound_average=128000
+3. 网络创建
+
+sh /root/install/master/08_neutron_network.sh  
+执行下面显示的命令
+
+
+
+#多机房，物理网络隔离--特殊网络
+/etc/neutron/plugin.ini
+[ml2_type_vlan]
+network_vlan_ranges = physnet1:1:4000, physnet2:1:4000, physnet3:1:4000, physnet4:1:4000
+[ovs]
+bridge_mappings = physnet1:br-bond1, physnet2:br-bond1, physnet3:br-bond1, physnet4:br-bond1
+
+#provider:segmentation_id 是 vlan id
+#physical_network=physnet1  根据机房地域做区分
+#tenant-id为manager账户
+#private_142为分配的IP第三位
+
+#例如 新西兰惠灵顿pro01-wlg
+neutron net-create pro01-wlg_vlan_nei --provider:network_type=vlan --tenant-id=8875cdf6751d4d7c8db145821a36fa7b --provider:physical_network=physnet1  --provider:segmentation_id=50
+neutron subnet-create --name=private_84 pro01-wlg_vlan_nei 10.208.84.0/22 --tenant-id=8875cdf6751d4d7c8db145821a36fa7b  --ip-version 4 --gateway 10.208.84.1 --allocation-pool start=10.208.84.10,end=10.208.87.200 --dns-nameserver 10.200.0.3 --dns-nameserver 219.141.136.10 --disable-dhcp
+
+neutron net-create pro01-wlg_vlan_wai --provider:network_type=vlan --tenant-id=8875cdf6751d4d7c8db145821a36fa7b --provider:physical_network=physnet1  --provider:segmentation_id=1
+neutron subnet-create --name=public_119 pro01-wlg_vlan_wai 11.208.84.0/22  --tenant-id=8875cdf6751d4d7c8db145821a36fa7b  --ip-version 4 --gateway 11.208.84.1 --allocation-pool start=11.208.84.10,end=11.208.87.200 --dns-nameserver 10.200.0.3 --dns-nameserver 219.141.136.10 --disable-dhcp
+
+neutron net-list
+neutron subnet-list
+
+
+五、其他注意事项
+
+VM网卡：第一个内网、第二个外网
+
+虚拟化比例，需要改nova-scheduler的配置，重启生效。
+测试：1:16
+生产：1:8
+电商：1:10  
+
+计算节点，批量创建名称：
+/etc/nova/nova.conf
+multi_instance_display_name_template = %(name)s-%(count)s
+
+命令行启动虚拟机
+nova boot --flavor 1 --image 44b5c49b-3a3b-415c-accf-9c0aebe48a10 --num-instances 2 --nic net-id=0328f682-2f6f-4281-a9b1-be7d2c5a0249 --nic net-id=3e1c4b2b-f23d-41f3-8337-2a04ba9a4fae  --availability_zone Cluster_A:c-84-28-dev01-jxq.bj-cn.vps.letv.cn  test
+
+外地CDN集群注意：
+1、 rabbitmq端口修改：
+/etc/rabbitmq/rabbitmq-env.conf
+RABBITMQ_NODE_PORT=9030
+

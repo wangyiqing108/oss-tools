@@ -1,0 +1,2 @@
+1.Exception: Versioning for this project requires either an sdist tarball, or access to an upstream git repository. Are you sure that git is installed?
+pip install cryptography

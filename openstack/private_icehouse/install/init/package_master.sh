@@ -1,0 +1,2 @@
+#!/bin/sh
+yum -y install glusterfs-server rabbitmq-server keepalived haproxy openstack-utils memcached mysql openstack-keystone python-keystoneclient openstack-glance openstack-nova-api openstack-nova-conductor openstack-nova-novncproxy openstack-nova-scheduler openstack-dashboard-2014.1.3-12.el6.noarch python-django-openstack-auth-1.1.5-1.el6.noarch openstack-neutron-openvswitch openstack-neutron openstack-neutron-ml2 python-neutronclient openstack-nova-console

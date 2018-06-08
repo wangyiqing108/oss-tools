@@ -1,0 +1,78 @@
+
+****************************************************
+脚本列表
+├── control.sh ##falcon服务批量启停
+├── db_schema
+│?? ├── create_tables.sh  ##各服务初始化建表
+│?? ├── dashboard-db-schema.sql
+│?? ├── graph-db-schema.sql
+│?? ├── links-db-schema.sql
+│?? ├── portal-db-schema.sql
+│?? └── uic-db-schema.sql
+├── falcon_install.sh  ##安装falcon
+├── haproxy_install.sh   ##安装keeplived+haproxy
+├── README
+└── redis_install.sh   ##安装redis
+******************************************************
+
+
+
+
+1、下载部署脚本到目标机器。
+脚本在gitlab上。
+http://legitlab.letv.cn/openstack-ops/sys-tools/tree/master/falcon
+
+2、创建表
+cd falcon/ db_schema/
+sh create_tables.sh
+
+3、安装keepalived+haproxy
+1）修改脚本参数
+#env
+KEEPALIVE=MASTER
+INTERFACE=br0
+ID=224
+VIP=10.248.97.243
+FALCON_A=10.248.9.224
+FALCON_B=10.248.9.225
+FALCON_A_NAME=falcon-9-224
+FALCON_B_NAME=falcon-9-225
+
+2）执行脚本
+sh haproxy_install.sh
+
+4、安装falcon
+1）修改脚本参数
+MYSQLSERVER=mysqlserver
+MYSQLPORT=4407
+MYSQLPASS=6Sfsf3rgw2
+
+REDISSERVER=redisserver
+REDISPORT=6378
+
+FALCONSERVER=falconserver
+FALCONVIP=10.248.97.243
+
+JUDGE00=10.248.97.224
+JUDGE01=10.248.97.225
+
+GRAPH00=10.248.97.224
+GRAPH01=10.248.97.225
+
+RGRAPH00=
+RGRAPH01=
+
+ALARM00=10.248.97.224
+ALARM01=10.248.97.225
+
+2）执行脚本，查看日志是否有报错。
+sh falcon_install.sh
+
+3）安装修改其中一台fe配置开放注册，注册用户。
+/etc/open-falcon/falcon-fe.json
+    "canRegister": true,
+systemctl restart falcon-fe
+
+http://10.248.97.224:1234注册用户
+admin  falcon@lecloud
+注册后，再修改为false，重启fe服务。

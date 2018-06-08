@@ -1,0 +1,11 @@
+#!/bin/bash
+docker_macvlan() {
+ docker_pid=$(docker inspect --format  {{.State.Pid}} $1)
+ ip link add p$2 link $2 type macvlan mode bridge
+ ip link set netns ${docker_pid} p$2
+}
+if [ "$1" == "" ] || [ "$1" == "-h" ];then
+    echo "usage: docker_macvlan docker_name eth0"
+else
+    docker_macvlan $1 $2
+fi

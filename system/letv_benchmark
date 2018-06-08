@@ -1,0 +1,329 @@
+#!/bin/bash
+#****************************************************************#
+# version 0.0.2
+# ScriptName: letv_benchmark
+# Author:
+# Create Date: 2015/07/03
+# Modify Author: yangtong1@letv.com
+# Function: system benchmark
+#***************************************************************#
+
+# benchmark config
+waitsec=300
+# cpu & memory
+cpu_bench_times=1
+mem_bench_times=1
+
+# disk
+## fio_pattern = disk/rbd
+fio_pattern=rbd
+fio_runtime=1
+#fio_disk=/letv/test
+fio_disk=fio_test
+fio_filesize=1G
+## rbd
+fio_clientname=admin
+fio_pool=scbench
+fio_disk=fio_test
+
+# mz
+package_size=64
+mz_eth=eth1
+ping_packages=5
+
+function sysinfo() {
+    # Gaather system info
+    cname=$(awk -F: '/model name/ {name=$2} END {print name}' /proc/cpuinfo )
+    cores=$(awk -F: '/model name/ {core++} END {print core}' /proc/cpuinfo )
+    freq=$(awk -F: ' /cpu MHz/ {freq=$2} END {print freq}' /proc/cpuinfo )
+    tram=$(free -m | awk 'NR==2 {print $2}' )
+    swap=$(free -m | awk 'NR==4 {print $2}' )
+    up=$(awk '{printf("%d days, %02d:%02d:%02d",($1/60/60/24),($1/60/60%24),($1/60%60),($1%60))}' /proc/uptime )
+    version=$(cat /etc/issue)
+    kernel=$(uname -r)
+    
+    #Add local IP and internet IP
+    #Add number of network interfaces
+    #Add interface speed
+    echo "Hostname: $HOSTNAME"
+    echo "CPU model: $cname"
+    echo "Number of cores: $cores"
+    echo "CPU frequency: $freq MHz"
+    echo "Total amount of ram: $tram MB"
+    echo "Total amount of swap: $swap MB"
+    echo "System kernel: $kernel"
+    split_line
+}
+
+function setup() {
+    # Install packages
+    which fio >/dev/null 2>&1||rpm -ivh http://openstack.oss.letv.cn/centos/6.5/updates/x86_64/Packages/fio-2.0.10-1.el6.x86_64.rpm >/dev/null 2>&1
+    which ubench >/dev/null 2>&1 ||rpm -ivh http://openstack.oss.letv.cn/centos/6.5/updates/x86_64/Packages/ubench-0.32-1.el6.x86_64.rpm >/dev/null 2>&1
+    which mz >/dev/null 2>&1 || rpm -ivh http://openstack.oss.letv.cn/centos/6.5/updates/x86_64/Packages/libnet-1.1.2.1-1.el6.x86_64.rpm >/dev/null 2>&1 && rpm -ivh http://openstack.oss.letv.cn/centos/6.5/updates/x86_64/Packages/libcli-1.9.3-1.el6.x86_64.rpm >/dev/null 2>&1 && rpm -ivh http://openstack.oss.letv.cn/centos/6.5/updates/x86_64/Packages/mz-0.40-1.el6.x86_64.rpm >/dev/null 2>&1
+    #rpm -q mutt ||yum install mutt -y >/dev/null 2>&1
+}
+
+function split_line() {
+    printf "%50s" '-' |tr " " '-';echo ""
+}
+
+function timeout() {
+    #waitsec=100
+    ( $* ) & pid=$!
+    ( sleep $waitsec && kill -HUP $pid ) 2>/dev/null & watchdog=$!
+    # if command finished
+    if wait $pid 2>/dev/null; then
+        pkill -HUP -P $watchdog
+        wait $watchdog
+    fi
+}
+
+
+# cpu (ubench)
+function cpu_benchmark() {
+    echo "cpu benchmark"
+    timeout ubench -c > /tmp/cpu_benchmark 2>/dev/null
+    i=2
+    while [ "$i" -le "$cpu_bench_times" ];do
+        timeout ubench -c >> /tmp/cpu_benchmark 2>/dev/null
+        let i+=1
+    done
+    sum=`cat /tmp/cpu_benchmark | grep 'Ubench CPU' |awk -F':  ' '{print $2}'| awk '{sum+=$1} END {print sum}'`
+    nl=`cat /tmp/cpu_benchmark | grep 'Ubench CPU' |awk -F':  ' '{print $2}' | wc -l`
+    if [ "$nl" == "0" ];then
+        avg=0
+    else
+        avg=$(($sum/$nl))
+    fi
+    result="sum: $sum,nl: $nl,CPU ubench: $avg"
+    echo $result|tee -a /tmp/benchmark_result
+    split_line|tee -a /tmp/benchmark_result
+}
+
+# mem (ubench)
+function mem_benchmark() {
+    echo "mem benchmark"
+    timeout ubench -m > /tmp/mem_benchmark 2>/dev/null
+    i=2
+    while [ "$i" -le "$mem_bench_times" ];do
+        timeout ubench -m >> /tmp/mem_benchmark 2>/dev/null
+        let i+=1
+    done
+    sum=`cat /tmp/mem_benchmark | grep 'Ubench MEM' |awk -F':  ' '{print $2}'| awk '{sum+=$1} END {print sum}'`
+    nl=`cat /tmp/mem_benchmark | grep 'Ubench MEM' |awk -F':  ' '{print $2}' | wc -l`
+    if [ "$nl" == "0" ];then
+        avg=0
+    else
+        avg=$(($sum/$nl))
+    fi
+    result="sum: $sum,nl: $nl,MEM ubench: $avg"
+    echo $result|tee -a /tmp/benchmark_result
+    split_line|tee -a /tmp/benchmark_result
+}
+   
+ # disk (fio)
+function disk_benchmark() {
+    echo "disk benchmark"
+    test -d /letv || mkdir /letv
+    disk=$fio_disk
+    bs_size=$2
+    runtime=$fio_runtime
+    filesize=$fio_filesize
+    clientname=$fio_clientname
+    pool=$fio_pool
+    fio_rand_read() {
+        # rand read
+        echo -n "rand_read,"
+        echo -n "$bs_size,"
+        if [ "$fio_pattern" == 'rbd' ];then
+            fio_command="fio -sync=1 -direct=1 -iodepth=16 -thread -rw=randread -ioengine=rbd -bs=$bs_size -size=$filesize -numjobs=8 -runtime=$runtime -pool=$pool -rbdname=$disk -clientname=$clientname -invalidate=0 -group_reporting -name=mytest"
+        else
+            fio_command="fio -filename=$disk -sync=1 -direct=1 -iodepth 16 -thread -rw=randread -ioengine=libaio -bs=$bs_size -size=$filesize -numjobs=8 -runtime=$runtime -group_reporting -name=mytest"
+        fi
+        $fio_command|grep 'read : io'|grep -Eo "bw=[0-9]*.*iops=[0-9]*"|sed "s/, /,/g"|tr -t '\n' ','
+        echo -n "$disk,"
+        echo "$runtime"
+    }
+    fio_read() {
+        # read
+        echo -n "read,"
+        echo -n "$bs_size,"
+        if [ "$fio_pattern" == 'rbd' ];then
+            fio_command="fio -sync=1 -direct=1 -iodepth=16 -thread -rw=read -ioengine=rbd -bs=$bs_size -size=$filesize -numjobs=8 -runtime=$runtime -pool=$pool -rbdname=$disk -clientname=$clientname -invalidate=0 -group_reporting -name=mytest"
+        else
+            fio_command="fio -filename=$disk -sync=1 -direct=1 -iodepth 16 -thread -rw=read -ioengine=libaio -bs=$bs_size -size=$filesize -numjobs=8 -runtime=$runtime -group_reporting -name=mytest"
+        fi
+        $fio_command|grep 'read : io'|grep -Eo "bw=[0-9]*.*iops=[0-9]*"|sed "s/, /,/g"|tr -t '\n' ','
+        echo -n "$disk,"
+        echo "$runtime"
+    }
+    fio_rand_write() {
+        # rand write
+        echo -n "rand_write,"
+        echo -n "$bs_size,"
+        if [ "$fio_pattern" == 'rbd' ];then
+            fio_command="fio -sync=1 -direct=1 -iodepth=8 -thread -rw=randwrite -ioengine=rbd -bs=$bs_size -size=$filesize -numjobs=8 -runtime=$runtime -pool=$pool -rbdname=$disk -clientname=$clientname -invalidate=0 -group_reporting -name=mytest"
+        else
+            fio_command="fio -filename=$disk -sync=1 -direct=1 -iodepth 8 -thread -rw=randwrite -ioengine=libaio -bs=$bs_size -size=$filesize -numjobs=2 -runtime=$runtime -group_reporting -name=mytest"
+        fi
+        $fio_command|grep 'write: io'|grep -Eo "bw=[0-9]*.*iops=[0-9]*"|sed "s/, /,/g"|tr -t '\n' ','
+        echo -n "$disk,"
+        echo "$runtime"
+    }
+    fio_write() {
+        # write
+        echo -n "write,"
+        echo -n "$bs_size,"
+        if [ "$fio_pattern" == 'rbd' ];then
+            fio_command="fio -sync=1 -direct=1 -iodepth=8 -thread -rw=write -ioengine=rbd -bs=$bs_size -size=$filesize -numjobs=8 -runtime=$runtime -pool=$pool -rbdname=$disk -clientname=$clientname -invalidate=0 -group_reporting -name=mytest"
+        else
+            fio_command="fio -filename=$disk -sync=1 -direct=1 -iodepth 8 -thread -rw=write -ioengine=libaio -bs=$bs_size -size=$filesize -numjobs=2 -runtime=$runtime -group_reporting -name=mytest"
+        fi
+        $fio_command|grep 'write: io'|grep -Eo "bw=[0-9]*.*iops=[0-9]*"|sed "s/, /,/g"|tr -t '\n' ','
+        echo -n "$disk,"
+        echo "$runtime"
+    }
+    fio_read_write() {
+        # read & write
+        if [ "$fio_pattern" == 'rbd' ];then
+            fio_command="fio -sync=1 -direct=1 -iodepth=8 -thread -rw=randrw -rwmixread=70 -ioengine=rbd -bs=$bs_size -size=$filesize -numjobs=8 -runtime=$runtime -pool=$pool -rbdname=$disk -clientname=$clientname -invalidate=0 -group_reporting -name=mytest"
+        else
+            fio_command="fio -filename=$disk -sync=1 -direct=1 -iodepth 8 -thread -rw=randrw -rwmixread=70 -ioengine=libaio -bs=$bs_size -size=$filesize -numjobs=8  -runtime=$runtime -group_reporting -name=mytest"
+        fi
+        echo -n "rw_write,"
+        echo -n "$bs_size,"
+        $fio_command|grep -E "write: io"|grep -Eo "bw=[0-9]*.*iops=[0-9]*"|sed "s/, /,/g"|tr -t '\n' ','
+        echo -n "$disk,"
+        echo "$runtime"
+        echo -n "rw_read,"
+        echo -n "$bs_size,"
+        $fio_command|grep -E "read : io"|grep -Eo "bw=[0-9]*.*iops=[0-9]*"|sed "s/, /,/g"|tr -t '\n' ','
+        echo -n "$disk,"
+        echo "$runtime"
+    }
+
+    drop_cache() {
+    echo 3>/proc/sys/vm/drop_caches 
+    sync
+    }
+    
+    for bs_size in 4k 16k 64k 128k 512k 1024k 8192k;do
+        drop_cache;fio_rand_read $disk $bs_size|tee -a /tmp/benchmark_result
+        drop_cache;fio_read $disk $bs_size|tee -a /tmp/benchmark_result
+        drop_cache;fio_rand_write $disk $bs_size|tee -a /tmp/benchmark_result
+        drop_cache;fio_write $disk $bs_size|tee -a /tmp/benchmark_result
+        drop_cache;fio_read_write $disk $bs_size|tee -a /tmp/benchmark_result
+    done
+    split_line|tee -a /tmp/benchmark_result
+}
+
+# network(mz)
+function network_benchmark() {
+    echo "network benchmark"
+    if [ ! -n "$2" ];then
+    network_help
+    fi
+
+    if [ "$2" = "create" ]; then
+    if [ -n "$4" ];then
+    mz_server_lists=$4
+        mz_server_lists=$(echo $mz_server_lists|tr "," " ")
+    fi
+    for mz_server in $mz_server_lists; do
+        for((i=1; i<=$3; i++));do
+            mz $mz_eth -t tcp -c 0 -d 1m -A 11.100.100.0/24 -B $mz_server -p $package_size &
+        done
+        NUM=`ps -ef | grep 11.100.100.0 | grep -v grep | wc -l`
+        echo "--------------------"
+        echo "mz progress is $NUM "|tee -a /tmp/benchmark_result
+        echo "--------------------"
+    done
+    fi
+
+    if [ "$2" = "num" ]; then
+    NUM=`ps -ef | grep 11.100.100.0 | grep -v grep | wc -l`
+    echo "--------------------"
+    echo "mz progress is $NUM "
+    echo "--------------------"
+    fi
+    
+    if [ "$2" = "kill" ]; then
+    killall mz
+    NUM=`ps -ef | grep 11.100.100.0 | grep -v grep | wc -l`
+    echo "--------------------"
+    echo "mz progress is $NUM "
+    echo "--------------------"
+    fi
+    
+    if [ "$2" = "dstat" ]; then
+        ssh_command="ssh -T -q  -o IdentitiesOnly=yes -o ConnectTimeout=1 -o PasswordAuthentication=no"
+        echo "dstat $3..."|tee -a /tmp/benchmark_result
+        ssh_test=$($ssh_command $3 "echo OK")
+        if [ "$ssh_test" = "OK" ];then
+                waitsec=10
+        timeout $ssh_command $3 "dstat -N $mz_eth -n --net-packets 1" |tee -a /tmp/benchmark_result
+    else
+        echo "ssh $3 connect is error!"
+    fi
+    fi
+
+    if [ "$2" = "ping" ]; then
+        echo "ping $3..."|tee -a /tmp/benchmark_result
+        ping $3 -c $ping_packages|tee -a /tmp/benchmark_result
+    fi
+    split_line|tee -a /tmp/benchmark_result
+}
+
+function benchmark_help() {
+    echo "letv system benchmark"
+    echo "Usage: letv_benchmark cpu - ubench cpu score"
+    echo "       letv_benchmark mem - ubench mem score"
+    echo "       letv_benchmark disk - fio test disk iops and bw"
+    echo "       letv_benchmark network - mz test network"
+    network_help
+    echo "       letv_benchmark all - all of cpu and memory test"
+}
+
+function network_help() {
+    echo "   - letv_benchmark network create 1 10.100.2.97"
+    echo "   - letv_benchmark network create 1 10.100.2.152,10.100.2.151"
+    echo "   - letv_benchmark network kill"
+    echo "   - letv_benchmark network num"
+    echo "   - letv_benchmark network dstat 10.100.2.152"
+    echo "   - letv_benchmark network ping 10.100.2.152"
+}
+#set -x
+function main() {
+    setup 
+    curr_time=$(date +"%Y-%m-%d %H:%M:%S")
+    mail_from="benchmark@letv.com"
+    mail_subject="letv benchmark [$curr_time]"
+    mail_list="yangtong1@letv.com"
+    mail_content="/tmp/benchmark_result"
+    benchmark_result="/tmp/benchmark_result"
+
+    sys_tag=$(head -n 10 /tmp/benchmark_result |grep "CPU model"|wc -l)
+    if [ "$sys_tag" == 0 ];then
+        sysinfo >> /tmp/benchmark_result
+    fi
+
+    echo "benchmark begin at $curr_time ..." >> /tmp/benchmark_result
+    case "$1" in
+        cpu ) cpu_benchmark;;
+        mem ) mem_benchmark;;
+        disk ) disk_benchmark;;
+        network ) network_benchmark "$@";;
+        all ) cpu_benchmark;mem_benchmark;disk_benchmark;;
+        help|"" ) benchmark_help;;
+    esac
+    # mail to user result
+    #mutt -s "$mail_subject" $mail_list < $mail_content >/dev/null 2>&1
+}
+
+if [ "$(id -u)" != "0" ]; then
+    echo -e "${RC}Error: You must be root to run this script!${EC}"; exit 1
+elif [ "$(basename "$0")" = "letv_benchmark" ] || [ "$(basename "$0")" = "bash" -a "$_" = "$0" ]; then
+    main "$@"
+else 
+    echo "change the script name to letv_benchmark!" 
+fi

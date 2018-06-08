@@ -1,0 +1,192 @@
+#!/usr/bin/python
+#coding=utf-8
+import keystoneclient.v2_0.client as ksclient
+from novaclient import client as novaclient
+from novaclient.openstack.common import strutils
+import prettytable
+import socket
+import re
+import os
+import csv
+
+def get_keystone_creds():
+    d = {}
+    d['username'] = os.environ['OS_USERNAME']
+    d['password'] = os.environ['OS_PASSWORD']
+    d['auth_url'] = os.environ['OS_AUTH_URL']
+    d['tenant_name'] = os.environ['OS_TENANT_NAME']
+    if os.environ.has_key('OS_REGION_NAME'):
+        d['region_name'] = os.environ['OS_REGION_NAME']
+    if os.environ.has_key('OS_CACERT'):
+        d['cacert'] = os.environ['OS_CACERT']
+    return d
+
+def get_nova_creds():
+    d = {}
+    d['username'] = os.environ['OS_USERNAME']
+    d['api_key'] = os.environ['OS_PASSWORD']
+    d['auth_url'] = os.environ['OS_AUTH_URL']
+    d['project_id'] = os.environ['OS_TENANT_NAME']
+    if os.environ.has_key('OS_REGION_NAME'):
+        d['region_name'] = os.environ['OS_REGION_NAME']
+    if os.environ.has_key('OS_CACERT'):
+        d['cacert'] = os.environ['OS_CACERT']
+    return d
+
+def get_host_ip(host):
+    return socket.getaddrinfo('%s' % host ,None)[0][4][0]
+
+def _translate_keys(collection, convert):
+    for item in collection:
+        keys = item.__dict__.keys()
+        for from_key, to_key in convert:
+            if from_key in keys and to_key not in keys:
+                setattr(item, to_key, item._info[from_key])
+
+def _translate_extended_states(collection):
+    power_states = [
+        'NOSTATE',      # 0x00
+        'Running',      # 0x01
+        '',             # 0x02
+        'Paused',       # 0x03
+        'Shutdown',     # 0x04
+        '',             # 0x05
+        'Crashed',      # 0x06
+        'Suspended'     # 0x07
+    ]
+
+    for item in collection:
+        try:
+            setattr(item, 'power_state',
+                power_states[getattr(item, 'power_state')]
+            )
+        except AttributeError:
+            setattr(item, 'power_state', "N/A")
+        try:
+            getattr(item, 'task_state')
+        except AttributeError:
+            setattr(item, 'task_state', "N/A")
+
+def flavor_dict():
+    flavor_dicts = {}
+    for i in nova.flavors.list(detailed=True):
+         key = i.__dict__['id']
+         flavor_dicts[key] = i.__dict__['name']
+    return flavor_dicts
+
+def image_dict():
+    image_dicts = {}
+    for i in nova.images.list(detailed=True):
+         key = i.__dict__['id']
+         image_dicts[key] = i.__dict__['name']
+    return image_dicts
+
+def printlist(objs, fields, formatters={}, sortby_index=None):
+    csvfile = file('/tmp/vm_report.csv', 'wb')
+    writer = csv.writer(csvfile)
+
+    title = [u'宿主机ip', u'虚拟机ip', u'主机名', u'虚拟机状态', u'CPU', u'内存', u'磁盘', u'镜像版本', u'kvm实例名称', u'实例ID']
+    title = [ i.encode('gb2312') for i in title ]
+    writer.writerow(title)
+
+    if sortby_index is None:
+        sortby = None
+    else:
+        sortby = fields[sortby_index]
+    flavor_dicts = flavor_dict()
+    image_dicts = image_dict()
+    mixed_case_fields = ['serverId']
+    for o in objs:
+        row = []
+        host = getattr(o, 'host', '')
+        row.append(get_host_ip(host))
+        for field in fields:
+            if field in formatters:
+                pass
+                try:
+                    row.append(formatters[field](o).encode('utf-8'))
+                except Exception:
+                    row.append('none')
+            elif field in ['flavor']:
+                flavor_id = getattr(o, field, '')['id']
+                try:
+                    flavor_name = flavor_dicts[flavor_id]
+                except Exception:
+                    flavor_name = 'none'
+                [ row.append(i.encode('utf-8')) for i in flavor_name.split('-')]
+            elif field in ['image']:
+                image_id = getattr(o, field, '')['id']
+                try:
+                    image_name = image_dicts[image_id]
+                except Exception:
+                    image_name = 'none'
+                row.append(image_name.encode('utf-8'))
+            elif field in mixed_case_fields:
+                field_name = field.replace(' ', '_')
+            else:
+                field_name = field.lower().replace(' ', '_')
+                data = getattr(o, field_name, '')
+                if data is None:
+                    data = '-'
+                row.append(data.encode('utf-8'))
+        print row
+        writer.writerow(row)
+    csvfile.close()
+
+def _format_servers_list_networks(server):
+    output = []
+    for (network, addresses) in server.networks.items():
+        if len(addresses) == 0:
+            continue
+        addresses_csv = ', '.join(addresses)
+        group = "%s" % (addresses_csv)
+        m = re.match(r"^10", group)
+        if m:
+            output.append(group)
+            return output[0]
+        else:
+            continue
+
+keystone_creds = get_keystone_creds()
+nova_creds = get_nova_creds()
+
+nova = novaclient.Client("1.1", **nova_creds)
+search_opts={'all_tenants': 1}
+formatters = {}
+field_titles = []
+
+id_col = 'ID'
+
+
+servers = nova.servers.list(detailed=True,
+                          search_opts=search_opts)
+convert = [('OS-EXT-SRV-ATTR:host', 'host'),
+           ('OS-EXT-STS:task_state', 'task_state'),
+           ('OS-EXT-SRV-ATTR:instance_name', 'instance_name'),
+           ('OS-EXT-AZ:availability_zone', 'availability_zone'),
+           ('OS-EXT-SRV-ATTR:instance_name', 'instance_name'),
+           ('flavor', 'flavor'),
+           ('image', 'image'),
+           ('OS-EXT-STS:power_state', 'power_state'),
+           ('hostId', 'host_id')]
+_translate_keys(servers, convert)
+
+_translate_keys(servers, convert)
+_translate_extended_states(servers)
+
+
+columns = [
+     'Networks',
+     'Name',
+     'Status',
+     'flavor',
+     'image',
+     'instance_name',
+     #'host',
+     #'Power State',
+     #'availability_zone',
+     id_col
+]
+formatters['Networks'] = _format_servers_list_networks
+
+printlist(servers, columns, formatters, sortby_index=1)

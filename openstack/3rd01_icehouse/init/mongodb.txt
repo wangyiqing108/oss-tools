@@ -1,0 +1,37 @@
+yum install mongodb mongodb-server -y
+openssl rand -base64 741 > mongodb-keyfile
+chmod 600 mongodb-keyfile
+chown mongodb.mongodb /letv/mongodb-keyfile
+
+vi /etc/mongodb.conf
+bind_ip = 0.0.0.0
+port = 27017
+fork = true
+pidfilepath = /var/run/mongodb/mongodb.pid
+logpath = /var/log/mongodb/mongodb.log
+dbpath =/var/lib/mongodb
+journal = true
+keyFile = /letv/mongodb-keyfile
+nohttpinterface = true
+auth = true
+setParameter = enableLocalhostAuthBypass=1
+
+## replica set名称
+replSet = ceilometer
+
+
+mongo客户端
+rs.initiate({_id:"ceilometer",members:[
+{_id:0,host:"10.154.140.200:27017",priority:10},
+{_id:1,host:"10.154.140.223:27017",priority:9},
+{_id:2,host:"10.154.140.228:27017",priority:9,arbiterOnly:true}
+]})
+
+rs.status()
+
+use ceilometer
+db.addUser( { user: "ceilometer",
+              pwd: "ZDY2ZTRjMTUyN2E",
+              roles: [ "readWrite", "dbAdmin" ]
+            } )
+
