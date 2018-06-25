@@ -1,0 +1,151 @@
+#!/bin/bash
+
+###################################################################
+#此发布脚本只针对大陆国广万象rbs服务
+
+PATH=$PATH:/usr/sbin:/sbin:/bin
+export PATH
+echo $PATH
+
+#部署目录
+SVR_PATH="/letv/search/deploy/rbs"
+
+set | grep DCMD
+
+prepare(){
+echo  "Begin prepare........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "prepare enviroment:"
+
+# 检查用户
+id $DCMD_SVR_USER >/dev/null  
+if [ $? -ne 0 ];then  
+   useradd -d $DCMD_SVR_PATH $DCMD_SVR_USER  
+   id $DCMD_SVR_USER
+fi 
+echo "$DCMD_SVR_USER user is ready."
+
+# 检查部署目录
+[[ -L $SVR_PATH/conf ]] && cd $SVR_PATH
+[[ ! -d "$SVR_PATH" ]] && mkdir -p $SVR_PATH
+[[ ! -d "$DCMD_SVR_PATH" ]] && mkdir -p $DCMD_SVR_PATH
+chown -R $DCMD_SVR_USER.$DCMD_SVR_USER $DCMD_SVR_PATH  $SVR_PATH
+id $DCMD_SVR_USER >/dev/null && [[ -d "$DCMD_SVR_PATH" ]] && [[ -d "$SVR_PATH" ]]
+exit $?
+}
+
+start(){
+echo  "Begin start........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "start enviroment:"
+SERVICE_SBIN="${SVR_PATH}/sbin/start.sh"
+if [ -f "${SERVICE_SBIN}" ];then
+    /bin/sh $SERVICE_SBIN
+else
+    echo "don't init."
+    exit 0
+fi
+exit $?
+}
+
+stop(){
+echo  "Begin stop........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "stop enviroment:"
+SERVICE_SBIN="${SVR_PATH}/sbin/stop.sh"
+if [ -f "${SERVICE_SBIN}" ];then
+    /bin/sh $SERVICE_SBIN
+else
+    echo "don't init."
+    exit 0
+fi
+exit $?
+}
+
+check(){
+echo  "Begin check........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "check enviroment:"
+ps aux | egrep "rbs_gg|rbs_cn|rbs_super" | grep -v grep
+exit $?
+}
+
+install(){
+echo  "Begin install........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "install type: $3"
+
+LOG_DIR=$SVR_PATH/logs
+BIN_DIR=$SVR_PATH/bin
+CONF_DIR=$SVR_PATH/conf
+[[ ! -d "$LOG_DIR" ]] && /bin/mkdir -p $LOG_DIR
+[[ ! -d "$BIN_DIR" ]] && /bin/mkdir -p $BIN_DIR
+[[ ! -d "$CONF_DIR" ]] && /bin/mkdir -p $CONF_DIR
+
+if [ $3 == "all" ];then
+  echo  "new_pkg_path: $4"
+  echo  "new_env_path: $5"
+  SERVICE_PKG=$4
+  SERVICE_ENV=$5
+  /bin/cp -arf $SERVICE_ENV/* $SVR_PATH/ 
+  cd $SVR_PATH/bin
+  serverbin=$SVR_PATH/bin/rbs_server
+  if [ -L $serverbin ]
+  then
+    rm -rf $serverbin
+    /bin/cp -arf $SERVICE_PKG/* $SVR_PATH/  
+  else
+    mv $SVR_PATH/bin/rbs_server $SVR_PATH/bin/rbs_server.`date +%Y%m%d%H%M%S`
+    /bin/cp -arf $SERVICE_PKG/* $SVR_PATH/
+  fi
+  chmod +x $SVR_PATH/bin/*
+  echo "----> copy complete!"
+elif [ $3 == "pkg" ];then
+  echo  "new_pkg_path: $4"
+  SERVICE_PKG=$4
+  cd $SVR_PATH/bin
+  serverbin=$SVR_PATH/bin/rbs_server
+  if [ -L $serverbin ]
+  then
+    rm -rf $serverbin
+    /bin/cp -arf $SERVICE_PKG/* $SVR_PATH/  
+  else
+    mv $SVR_PATH/bin/rbs_server $SVR_PATH/bin/rbs_server.`date +%Y%m%d%H%M%S`
+    /bin/cp -arf $SERVICE_PKG/* $SVR_PATH/
+  fi
+  chmod +x $SVR_PATH/bin/* 
+  echo "----> copy complete!"
+elif [ $3 == "env" ];then
+  echo  "new_env_path: $4"
+  SERVICE_ENV=$4
+  /bin/cp -arf $SERVICE_ENV/* $SVR_PATH/
+  #md5sum $SERVICE_HOME/conf/*  
+  echo "----> copy complete!"
+else
+  echo "invalid install type:$3"
+fi
+echo $SERVICE_PKG
+echo $SERVICE_ENV
+echo $SVR_PATH
+echo  "End install."
+}
+
+if [ $1 == "start" ]; then
+  start $*
+elif [ $1 == "stop" ]; then
+  stop $*
+elif [ $1 == "check" ]; then
+  check $*
+elif [ $1 == "install" ]; then
+  install $*
+elif [ $1 == "prepare" ]; then
+  prepare $*
+else
+  echo "invalid action"
+fi
+

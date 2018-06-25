@@ -1,0 +1,74 @@
+#!/bin/bash
+
+###################################################################
+PATH=$PATH:/usr/sbin:/sbin:/bin
+export PATH
+echo $PATH
+
+#部署目录
+SVR_PATH="/letv/dockertest/"
+
+set | grep DCMD > /letv/dcmd.env
+
+prepare(){
+echo  "Begin prepare........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "container name: $3"
+echo  "prepare enviroment:"
+
+echo "prepare end"
+
+}
+
+start(){
+echo  "Begin start........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "container name: $3"
+echo  "start enviroment:"
+echo "start end"
+CONTAINER_NAME=$3
+docker run -d -it --name=$CONTAINER_NAME -p 8088:80  reg-test.lecloud.com/test_service/app_svr_nginx:7.2 /bin/bash
+#sh start.sh $CONTAINER_NAME
+}
+
+stop(){
+echo  "Begin stop........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "container name: $3"
+echo  "stop enviroment:"
+echo "stop end"
+}
+
+install(){
+echo  "Begin install........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo $SVR_PATH
+echo  "End install."
+}
+check(){
+echo  "Begin check........."
+echo  "Action: $1"
+echo  "service home: $2"
+echo  "container name: $3"
+echo  "check enviroment:"
+echo  "check end"
+}
+
+if [ $1 == "start" ]; then
+  start $*
+elif [ $1 == "stop" ]; then
+  stop $*
+elif [ $1 == "check" ]; then
+  check $*
+elif [ $1 == "install" ]; then
+  install $*
+elif [ $1 == "prepare" ]; then
+  prepare $*
+else
+  echo "invalid action"
+fi
+
